@@ -36,7 +36,6 @@ class QuoteModelValidationTest(TestCase):
             if expected_error_field:
                 self.assertIn(expected_error_field, context.exception.message_dict)
 
-    @expectedFailure
     def test_quote_tomorrow(self):
         quote = Quote(
             text="A",

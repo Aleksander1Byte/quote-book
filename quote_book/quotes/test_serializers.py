@@ -27,7 +27,7 @@ class QuoteSerializerDetailedTest(TestCase):
             ("author_many_digits", "1234567890", True),
             ("author_many_digits2", "123456789987654321", True),
             # user_id
-            ("user_id_valid", "user_12345", True, None),
+            ("user_id_valid", "user_12345", True),
             ("user_id_with_underscore", "user_id_with_underscore", True),
             ("user_id_with_digits", "12345", True),
             ("user_id_mixed", "user_123_v2", True),
