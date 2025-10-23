@@ -3,9 +3,8 @@ from rest_framework.routers import DefaultRouter
 from .views import QuoteViewSet
 
 router = DefaultRouter()
-router.register(r'quotes', QuoteViewSet)
+router.register(r"quotes", QuoteViewSet)
 
 urlpatterns = [
-    path('', include(router.urls)),
+    path("", include(router.urls)),
 ]
-

@@ -6,13 +6,13 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('quotes', '0001_initial_squashed_0002_alter_quote_options'),
+        ("quotes", "0001_initial_squashed_0002_alter_quote_options"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='quote',
-            name='user_id',
+            model_name="quote",
+            name="user_id",
             field=models.CharField(max_length=30),
         ),
     ]

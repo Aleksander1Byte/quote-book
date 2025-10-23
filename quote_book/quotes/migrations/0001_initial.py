@@ -8,19 +8,26 @@ class Migration(migrations.Migration):
 
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='Quote',
+            name="Quote",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('text', models.CharField(max_length=500)),
-                ('author', models.CharField(max_length=100)),
-                ('user_id', models.CharField(max_length=30, unique=True)),
-                ('timestamp', models.DateField(default=datetime.date.today)),
-                ('created', models.DateTimeField(auto_now_add=True)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("text", models.CharField(max_length=500)),
+                ("author", models.CharField(max_length=100)),
+                ("user_id", models.CharField(max_length=30, unique=True)),
+                ("timestamp", models.DateField(default=datetime.date.today)),
+                ("created", models.DateTimeField(auto_now_add=True)),
             ],
         ),
     ]
