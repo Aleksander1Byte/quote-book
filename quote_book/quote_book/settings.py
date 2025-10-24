@@ -11,8 +11,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "simple_key")
 
+
 def load_bool(value: str) -> bool:
     return value.lower() in ("1", "true", "yes", "t", "y")
+
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = load_bool(os.getenv("DJANGO_DEBUG", "t"))
