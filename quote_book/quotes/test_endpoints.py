@@ -118,14 +118,14 @@ class QuoteEndpointTest(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            len(response.data),
+            response.data["count"],
             expected_count,
             f"Фильтр по user_id '{user_id}' должен вернуть {expected_count} записей, "
             f"вернул {len(response.data)}",
         )
 
         if expected_count > 0:
-            for quote_data in response.data:
+            for quote_data in response.data["results"]:
                 self.assertEqual(quote_data["user_id"], user_id)
 
 
