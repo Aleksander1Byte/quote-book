@@ -16,4 +16,6 @@ jobs:
         
     - run: pip install -r requirements-dev.txt
     
-    - run: flake8 .
+    - run: cd quote_book/
+
+    - run: flake8 . -v
