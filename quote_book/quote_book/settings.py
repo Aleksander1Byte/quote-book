@@ -19,7 +19,7 @@ def load_bool(value: str) -> bool:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = load_bool(os.getenv("DJANGO_DEBUG", "t"))
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ("localhost", "127.0.0.1", "backend", "0.0.0.0")
 
 
 # Application definition

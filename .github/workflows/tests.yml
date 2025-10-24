@@ -13,6 +13,6 @@ jobs:
       with:
         python-version: '3.12'
     
-    - run: pip install -r requirements.txt
+    - run: pip install -r quote_book/requirements.txt
 
     - run: cd quote_book/ && python manage.py test
