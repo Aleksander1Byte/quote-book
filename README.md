@@ -1,0 +1,1 @@
+[![CI](https://github.com/Aleksander1Byte/quote-book/actions/workflows/flake8.yml/badge.svg)](https://github.com/Aleksander1Byte/quote-book/actions/workflows/flake8.yml) [![Tests](https://github.com/Aleksander1Byte/quote-book/actions/workflows/tests.yml/badge.svg)](https://github.com/Aleksander1Byte/quote-book/actions/workflows/tests.yml)
