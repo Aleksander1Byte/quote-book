@@ -3,7 +3,8 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  lint-and-test:
+  flake8:
+    name: Flake8
     runs-on: ubuntu-latest
     
     steps:
@@ -16,5 +17,19 @@ jobs:
     - run: pip install -r requirements-dev.txt
     
     - run: flake8 .
-    - run: python manage.py test
+
+  django-tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+        
+    - run: pip install -r requirements-dev.txt
+    
+    - run: python quote_book/manage.py test
 
