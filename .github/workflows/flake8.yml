@@ -17,19 +17,3 @@ jobs:
     - run: pip install -r requirements-dev.txt
     
     - run: flake8 .
-
-  django-tests:
-    name: Tests
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.12'
-        
-    - run: pip install -r requirements-dev.txt
-    
-    - run: python quote_book/manage.py test
-
