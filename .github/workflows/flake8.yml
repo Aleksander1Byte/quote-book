@@ -16,6 +16,6 @@ jobs:
         
     - run: pip install -r requirements-dev.txt
     
-    - run: cd quote_book/
+    - run: cd telegram_bot/ && flake8 . -v
 
-    - run: flake8 . -v
+    - run: cd quote_book/ && flake8 . -v
