@@ -1,6 +1,7 @@
+from datetime import date
+
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext as _
-from datetime import date
 
 
 def validate_date(value):

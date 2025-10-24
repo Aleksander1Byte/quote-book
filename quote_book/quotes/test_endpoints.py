@@ -1,7 +1,8 @@
 from django.urls import reverse
+from parameterized import parameterized
 from rest_framework import status
 from rest_framework.test import APITestCase
-from parameterized import parameterized
+
 from .models import Quote
 
 
@@ -99,7 +100,8 @@ class QuoteEndpointTest(APITestCase):
             response.status_code,
             expected_status,
             f"Тест '{name}' не прошел: ожидался статус {expected_status}, "
-            f"получен {response.status_code}. Ответ: {getattr(response, 'data', 'No data')}",
+            f"получен {response.status_code}."
+            f"Ответ: {getattr(response, 'data', 'No data')}",
         )
 
     @parameterized.expand(
@@ -123,7 +125,6 @@ class QuoteEndpointTest(APITestCase):
         )
 
         if expected_count > 0:
-            # Проверяем, что все возвращенные записи соответствуют фильтру
             for quote_data in response.data:
                 self.assertEqual(quote_data["user_id"], user_id)
 
@@ -162,7 +163,8 @@ class QuoteEndpointRobustnessTest(APITestCase):
             ),
             (
                 "timestamp_as_array",
-                '{"text": "text", "author": "author", "user_id": "user", "timestamp": ["2025-10-23"]}',
+                '{"text": "text", "author": "author",'
+                '"user_id": "user", "timestamp": ["2025-10-23"]}',
                 status.HTTP_400_BAD_REQUEST,
             ),
             # Too big values
@@ -315,13 +317,14 @@ class QuoteEndpointRobustnessTest(APITestCase):
                 response.status_code,
                 expected_status,
                 f"Тест '{test_name}': ожидался статус {expected_status}, "
-                f"получен {response.status_code}. Ответ: {getattr(response, 'data', 'No data')}",
+                f"получен {response.status_code}."
+                "Ответ: {getattr(response, 'data', 'No data')}",
             )
 
             if response.status_code >= status.HTTP_400_BAD_REQUEST:
                 self.assertTrue(
                     hasattr(response, "data"),
-                    f"При ошибке должен возвращаться response.data",
+                    f"При ошибке должен возвращаться {response.data}",
                 )
 
         except Exception as e:

@@ -1,8 +1,8 @@
-from django.test import TestCase
-from django.utils import timezone
-from parameterized import parameterized
-from rest_framework.exceptions import ErrorDetail
 from datetime import date, timedelta
+
+from django.test import TestCase
+from parameterized import parameterized
+
 from .models import Quote
 from .serializers import QuoteSerializer
 
@@ -66,7 +66,8 @@ class QuoteSerializerDetailedTest(TestCase):
             self.assertIn(
                 expected_error_field,
                 serializer.errors,
-                f"Ожидалась ошибка в поле '{expected_error_field}', но получены: {serializer.errors.keys()}",
+                f"Ожидалась ошибка в поле '{expected_error_field}',"
+                "но получены: {serializer.errors.keys()}",
             )
 
     @parameterized.expand(

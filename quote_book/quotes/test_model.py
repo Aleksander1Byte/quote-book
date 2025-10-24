@@ -1,9 +1,10 @@
-from django.test import TestCase
-from django.core.exceptions import ValidationError
-from parameterized import parameterized
 from datetime import date, timedelta
+
+from django.core.exceptions import ValidationError
+from django.test import TestCase
+from parameterized import parameterized
+
 from .models import Quote
-from unittest import expectedFailure
 
 
 class QuoteModelValidationTest(TestCase):
@@ -43,7 +44,7 @@ class QuoteModelValidationTest(TestCase):
             user_id="1",
             timestamp=date.today() + timedelta(days=1),
         )
-        with self.assertRaises(ValidationError) as context:
+        with self.assertRaises(ValidationError):
             quote.full_clean()
 
     def test_timestamp_default(self):
