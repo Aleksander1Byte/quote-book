@@ -1,0 +1,5 @@
+black>=23.0.0
+flake8>=6.0.0
+flake8-comprehensions>=3.17.0
+pep8-naming>=0.13.0
+isort>=7.0.0

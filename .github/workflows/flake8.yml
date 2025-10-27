@@ -1,0 +1,21 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  flake8:
+    name: Flake8
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+        
+    - run: pip install -r requirements-lint.txt
+    
+    - run: cd telegram_bot/ && flake8 . -v
+
+    - run: cd quote_book/ && flake8 . -v

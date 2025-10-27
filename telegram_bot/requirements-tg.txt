@@ -1,0 +1,4 @@
+requests
+dotenv
+python-telegram-bot[socks]>=22.5
+apscheduler==3.9.1
