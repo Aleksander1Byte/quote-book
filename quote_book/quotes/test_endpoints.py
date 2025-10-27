@@ -22,6 +22,20 @@ class QuoteEndpointTest(APITestCase):
 
     @parameterized.expand(
         [
+            ("random_by_existing_user", "test_user_1", 200),
+            ("random_by_another_user", "test_user_2", 200),
+            ("random_by_nonexistent_user", "nonexistent_user", 404),
+            ("random_special_chars_user", "@_@", 404),
+        ]
+    )
+    def test_random_endpoint(self, name, user_id, expected_code):
+        url = reverse("quote-random", kwargs={"user_id": user_id})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, expected_code)
+
+    @parameterized.expand(
+        [
             (
                 "list_quotes_success",
                 "get",
