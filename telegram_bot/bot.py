@@ -40,7 +40,7 @@ class SimpleQuoteBot:
             [
                 ["📖 Мои цитаты", "➕ Добавить цитату"],
                 ["🔍 Поиск по автору", "📅 Поиск по дате"],
-                ["🗑️ Удалить цитату", "ℹ️ Помощь"],
+                ["🗑️ Удалить цитату", "🎲 Случайность"],
             ],
             resize_keyboard=True,
         )
@@ -53,6 +53,7 @@ class SimpleQuoteBot:
         self.application.add_handler(CommandHandler("search", self.search_quote))
         self.application.add_handler(CommandHandler("search_date", self.search_by_date))
         self.application.add_handler(CommandHandler("delete", self.delete_quote))
+        self.application.add_handler(CommandHandler("random", self.random_quote))
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
         )
@@ -69,6 +70,7 @@ class SimpleQuoteBot:
             "📖 Доступные команды:\n\n"
             "📖 Мои цитаты - показать все ваши цитаты\n"
             "➕ Добавить цитату - создать новую цитату\n"
+            "🎲 Случайная цитата - получить случайную цитату\n"
             "🔍 Поиск по автору - найти цитаты по автору\n"
             "📅 Поиск по дате - найти цитаты по дате\n"
             "🗑️ Удалить цитату - удалить выбранную цитату\n\n"
@@ -76,6 +78,7 @@ class SimpleQuoteBot:
             "Или используйте команды:\n"
             "/quotes - мои цитаты\n"
             "/add - добавить цитату\n"
+            "/random - случайная цитата\n"
             "/search - поиск по автору\n"
             "/search_date - поиск по дате\n"
             "/delete - удалить цитату"
@@ -216,6 +219,33 @@ class SimpleQuoteBot:
         context.user_data["awaiting_quote"] = True
         context.user_data["quote_stage"] = "text"
 
+    async def random_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Получение случайной цитаты"""
+        user_id = f"{update.effective_user.id}"
+        response_data = self._make_api_request(f"/random/{user_id}", "GET")
+
+        if response_data:
+            response_data = response_data.json()
+            if response_data.get("id", 0):
+                text = (
+                    "🎲 Случайная цитата\n"
+                    f"\n\"{response_data['text']}\"\n— {response_data['author']}"
+                )
+                if "timestamp" in response_data:
+                    text += f" ({response_data['timestamp']})"
+
+                await update.message.reply_text(text, reply_markup=self.main_keyboard)
+            else:
+                await update.message.reply_text(
+                    "📝 У вас пока нет цитат",
+                    reply_markup=self.main_keyboard,
+                )
+
+        else:
+            await update.message.reply_text(
+                "❌ Ошибка при загрузке цитат", reply_markup=self.main_keyboard
+            )
+
     async def delete_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Удаление цитаты"""
         user_id = f"{update.effective_user.id}"
@@ -297,9 +327,9 @@ class SimpleQuoteBot:
             "📖 Мои цитаты": self.list_quotes,
             "➕ Добавить цитату": self.add_quote,
             "🔍 Поиск по автору": self.search_quote,
+            "🎲 Случайность": self.random_quote,
             "📅 Поиск по дате": self.search_by_date,
             "🗑️ Удалить цитату": self.delete_quote,
-            "ℹ️ Помощь": self.help_command,
         }
 
         if text in menu_actions:
