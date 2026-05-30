@@ -145,7 +145,7 @@ class SimpleQuoteBot:
 
         text = f"{title}\n\n"
         for i, quote in enumerate(quotes, start_number):
-            text += f"{i}. \"{quote['text']}\"\n— {quote['author']}"
+            text += f'{i}. "{quote["text"]}"\n— {quote["author"]}'
             if "timestamp" in quote:
                 text += f" ({quote['timestamp']})"
             text += "\n\n"
@@ -169,6 +169,7 @@ class SimpleQuoteBot:
         await update.message.reply_text(text, reply_markup=reply_markup)
 
         context.user_data["current_response"] = response_data
+        context.user_data["page_title"] = title
 
     async def _fetch_quotes_page(self, params, title="📖 Ваши цитаты"):
         """Универсальный метод получения страницы цитат"""
@@ -222,25 +223,23 @@ class SimpleQuoteBot:
     async def random_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение случайной цитаты"""
         user_id = f"{update.effective_user.id}"
-        response_data = self._make_api_request(f"/random/{user_id}", "GET")
+        try:
+            response = requests.get(f"{API_URL}/random/{user_id}")
+        except Exception:
+            response = None
 
-        if response_data:
-            response_data = response_data.json()
-            if response_data.get("id", 0):
-                text = (
-                    "🎲 Случайная цитата\n"
-                    f"\n\"{response_data['text']}\"\n— {response_data['author']}"
-                )
-                if "timestamp" in response_data:
-                    text += f" ({response_data['timestamp']})"
+        if response is not None and response.status_code == 200:
+            data = response.json()
+            text = f'🎲 Случайная цитата\n\n"{data["text"]}"\n— {data["author"]}'
+            if "timestamp" in data:
+                text += f" ({data['timestamp']})"
 
-                await update.message.reply_text(text, reply_markup=self.main_keyboard)
-            else:
-                await update.message.reply_text(
-                    "📝 У вас пока нет цитат",
-                    reply_markup=self.main_keyboard,
-                )
-
+            await update.message.reply_text(text, reply_markup=self.main_keyboard)
+        elif response is not None and response.status_code == 404:
+            await update.message.reply_text(
+                "📝 У вас пока нет цитат",
+                reply_markup=self.main_keyboard,
+            )
         else:
             await update.message.reply_text(
                 "❌ Ошибка при загрузке цитат", reply_markup=self.main_keyboard
@@ -394,7 +393,7 @@ class SimpleQuoteBot:
             context.user_data["quote_author"] = text
             context.user_data["quote_stage"] = "timestamp"
             await update.message.reply_text(
-                "📅 Укажите дату в формате ГГГГ-ММ-ДД"
+                "📅 Укажите дату в формате ГГГГ-ММ-ДД "
                 "(или отправьте '.' для текущей даты):"
             )
 
@@ -412,7 +411,7 @@ class SimpleQuoteBot:
                     quote_data["timestamp"] = text
                 except ValueError:
                     await update.message.reply_text(
-                        "❌ Неверный формат даты. Используйте"
+                        "❌ Неверный формат даты. Используйте "
                         "ГГГГ-ММ-ДД или '.' для текущей даты:"
                     )
                     return
@@ -425,7 +424,7 @@ class SimpleQuoteBot:
                 )
             else:
                 await update.message.reply_text(
-                    "❌ Ошибка при сохранении цитаты" " (проверьте ввод)",
+                    "❌ Ошибка при сохранении цитаты (проверьте ввод)",
                     reply_markup=self.main_keyboard,
                 )
 
