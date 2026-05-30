@@ -4,9 +4,11 @@ from django.db import migrations, models
 
 
 def backfill_author_lower(apps, schema_editor):
-    Quote = apps.get_model("quotes", "Quote")
-    for quote in Quote.objects.all().iterator():
-        Quote.objects.filter(pk=quote.pk).update(author_lower=quote.author.lower())
+    quote_model = apps.get_model("quotes", "Quote")
+    for quote in quote_model.objects.all().iterator():
+        quote_model.objects.filter(pk=quote.pk).update(
+            author_lower=quote.author.lower()
+        )
 
 
 class Migration(migrations.Migration):
