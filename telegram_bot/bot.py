@@ -1,17 +1,33 @@
+import math
 import os
-from datetime import datetime
-from urllib.parse import parse_qs, urlparse
+from datetime import date, datetime
 
 import requests
 from dotenv import load_dotenv
-from requests.exceptions import ConnectionError
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
+)
+
+from helpers import (
+    KEEP_DATE_BUTTON,
+    PAGE_LIMIT,
+    TODAY_BUTTON,
+    parse_callback,
+    parse_date_input,
+    validate_author,
+    validate_text,
 )
 
 load_dotenv()
@@ -20,7 +36,6 @@ API_URL = os.getenv("API_URL")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SOCKS5 = os.getenv("SOCKS5", "f").lower() in ("t", "true", "1", "y", "yes")
 proxy_url = os.getenv("proxy_url")
-PAGE_LIMIT = 5
 
 
 class SimpleQuoteBot:
@@ -44,6 +59,15 @@ class SimpleQuoteBot:
             ],
             resize_keyboard=True,
         )
+        self.cancel_keyboard = ReplyKeyboardMarkup(
+            [["🔙 Отмена"]], resize_keyboard=True
+        )
+        self.date_keyboard = ReplyKeyboardMarkup(
+            [[TODAY_BUTTON], ["🔙 Отмена"]], resize_keyboard=True
+        )
+        self.edit_date_keyboard = ReplyKeyboardMarkup(
+            [[KEEP_DATE_BUTTON, TODAY_BUTTON], ["🔙 Отмена"]], resize_keyboard=True
+        )
 
     def _setup_handlers(self):
         self.application.add_handler(CommandHandler("start", self.start))
@@ -54,6 +78,7 @@ class SimpleQuoteBot:
         self.application.add_handler(CommandHandler("search_date", self.search_by_date))
         self.application.add_handler(CommandHandler("delete", self.delete_quote))
         self.application.add_handler(CommandHandler("random", self.random_quote))
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
         )
@@ -68,257 +93,314 @@ class SimpleQuoteBot:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = (
             "📖 Доступные команды:\n\n"
-            "📖 Мои цитаты - показать все ваши цитаты\n"
-            "➕ Добавить цитату - создать новую цитату\n"
-            "🎲 Случайная цитата - получить случайную цитату\n"
-            "🔍 Поиск по автору - найти цитаты по автору\n"
-            "📅 Поиск по дате - найти цитаты по дате\n"
-            "🗑️ Удалить цитату - удалить выбранную цитату\n\n"
-            "Формат даты: YYYY-MM-DD (например: 2025-10-24)\n\n"
-            "Или используйте команды:\n"
-            "/quotes - мои цитаты\n"
-            "/add - добавить цитату\n"
-            "/random - случайная цитата\n"
-            "/search - поиск по автору\n"
-            "/search_date - поиск по дате\n"
-            "/delete - удалить цитату"
+            "📖 Мои цитаты — показать все ваши цитаты\n"
+            "➕ Добавить цитату — создать новую\n"
+            "🎲 Случайность — случайная цитата (с кнопкой «Ещё одну»)\n"
+            "🔍 Поиск по автору — без учёта регистра, по части имени\n"
+            "📅 Поиск по дате — найти цитаты за дату\n"
+            "🗑️ Удалить цитату — кнопка 🗑 рядом с цитатой\n"
+            "✏️ Редактировать — кнопка ✏️ рядом с цитатой в списке\n\n"
+            "Формат даты: ГГГГ-ММ-ДД (например: 2025-10-24)\n\n"
+            "Команды: /quotes /add /random /search /search_date /delete"
         )
         await update.message.reply_text(help_text, reply_markup=self.main_keyboard)
 
+    # ------------------------------------------------------------------ #
+    # HTTP
+    # ------------------------------------------------------------------ #
     def _make_api_request(self, endpoint, method="GET", params=None, json_data=None):
-        """Универсальный метод для API запросов"""
+        """Запрос к API. Возвращает Response (любой код) или None при сбое сети."""
+        url = f"{API_URL}{endpoint}"
         try:
-            if method.upper() == "GET":
-                response = requests.get(f"{API_URL}{endpoint}", params=params)
-            elif method.upper() == "POST":
-                response = requests.post(f"{API_URL}{endpoint}", json=json_data)
-            elif method.upper() == "DELETE":
-                response = requests.delete(f"{API_URL}{endpoint}", params=params)
-
-            if response.status_code in [200, 201, 204]:
-                return response
+            if method == "GET":
+                return requests.get(url, params=params, timeout=10)
+            if method == "POST":
+                return requests.post(url, json=json_data, timeout=10)
+            if method == "PATCH":
+                return requests.patch(url, json=json_data, params=params, timeout=10)
+            if method == "DELETE":
+                return requests.delete(url, params=params, timeout=10)
+        except requests.exceptions.RequestException:
             return None
-        except (ConnectionError, Exception):
-            return None
+        return None
 
-    def _get_current_offset(self, response_data):
-        """Вычисляет текущий offset из response_data"""
-        # Пробуем извлечь offset из current URL
-        if "current_params" in response_data:
-            return response_data["current_params"].get("offset", 0)
+    def _fetch_quotes(self, params):
+        """Получить страницу цитат. Возвращает (data|None, error|None).
 
-        # Если нет current_params, вычисляем из next/previous
-        next_url = response_data.get("next")
-        previous_url = response_data.get("previous")
+        error: 'network' — сеть недоступна, 'http' — не-200 ответ.
+        """
+        response = self._make_api_request("/quotes/", "GET", params=params)
+        if response is None:
+            return None, "network"
+        if response.status_code == 200:
+            return response.json(), None
+        return None, "http"
 
-        if next_url:
-            parsed = urlparse(next_url)
-            params = parse_qs(parsed.query)
-            offset = int(params.get("offset", 0)[0])
-            return max(0, offset - PAGE_LIMIT)
-        elif previous_url:
-            parsed = urlparse(previous_url)
-            params = parse_qs(parsed.query)
-            offset = int(params.get("offset", 0)[0])
-            return offset + PAGE_LIMIT
-        else:
-            return 0
+    @staticmethod
+    def _error_text(error):
+        if error == "network":
+            return "❌ Сервис недоступен, попробуйте позже"
+        return "❌ Не удалось загрузить цитаты"
 
-    async def _send_quote_page(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-        response_data,
-        title="📖 Ваши цитаты",
-    ):
-        """Отправка страницы с цитатами"""
-        quotes = response_data.get("results", [])
+    @staticmethod
+    async def _safe_edit(query, text, markup=None):
+        """Редактирование сообщения, устойчивое к 'message is not modified'."""
+        try:
+            await query.edit_message_text(text, reply_markup=markup)
+        except BadRequest:
+            pass
 
-        if not quotes:
+    # ------------------------------------------------------------------ #
+    # Рендеринг списка цитат
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _empty_text(mode, params):
+        if params.get("author"):
+            return f"🔍 По автору «{params['author']}» ничего не найдено"
+        if params.get("timestamp"):
+            return f"📅 За {params['timestamp']} цитат не найдено"
+        if mode == "delete":
+            return "📝 У вас пока нет цитат для удаления"
+        return "📝 У вас пока нет цитат.\nДобавьте первую — кнопка ➕ Добавить цитату"
+
+    @staticmethod
+    def _format_page(data, params, title):
+        quotes = data.get("results", [])
+        count = data.get("count", len(quotes))
+        offset = int(params.get("offset", 0))
+
+        lines = [title, ""]
+        for number, quote in enumerate(quotes, offset + 1):
+            line = f'{number}. "{quote["text"]}"\n— {quote["author"]}'
+            if quote.get("timestamp"):
+                line += f" ({quote['timestamp']})"
+            lines.append(line + "\n")
+
+        total_pages = max(1, math.ceil(count / PAGE_LIMIT))
+        current_page = offset // PAGE_LIMIT + 1
+        lines.append(f"📚 Всего цитат: {count} · стр. {current_page}/{total_pages}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_markup(quotes, data, offset, mode):
+        rows = []
+        if mode in ("delete", "edit"):
+            icon = "🗑" if mode == "delete" else "✏️"
+            action = "del" if mode == "delete" else "edit"
+            for number, quote in enumerate(quotes, offset + 1):
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            f"{icon} {number}",
+                            callback_data=f"{action}:{quote['id']}",
+                        )
+                    ]
+                )
+
+        nav = []
+        if data.get("previous"):
+            nav.append(
+                InlineKeyboardButton(
+                    "◀️", callback_data=f"nav:{max(0, offset - PAGE_LIMIT)}"
+                )
+            )
+        if data.get("next"):
+            nav.append(
+                InlineKeyboardButton("▶️", callback_data=f"nav:{offset + PAGE_LIMIT}")
+            )
+        if nav:
+            rows.append(nav)
+
+        return InlineKeyboardMarkup(rows) if rows else None
+
+    async def _send_page(self, update, context, params, title, mode):
+        """Отправить новую страницу цитат (из reply-кнопки/команды)."""
+        data, error = self._fetch_quotes(params)
+        if error:
             await update.message.reply_text(
-                "📝 Цитаты не найдены", reply_markup=self.main_keyboard
+                self._error_text(error), reply_markup=self.main_keyboard
             )
             return
 
-        current_offset = self._get_current_offset(response_data)
-        start_number = current_offset + 1
+        quotes = data.get("results", [])
+        if not quotes:
+            await update.message.reply_text(
+                self._empty_text(mode, params), reply_markup=self.main_keyboard
+            )
+            return
 
-        text = f"{title}\n\n"
-        for i, quote in enumerate(quotes, start_number):
-            text += f'{i}. "{quote["text"]}"\n— {quote["author"]}'
-            if "timestamp" in quote:
-                text += f" ({quote['timestamp']})"
-            text += "\n\n"
+        context.user_data["nav"] = {
+            "params": dict(params),
+            "title": title,
+            "mode": mode,
+        }
+        text = self._format_page(data, params, title)
+        markup = self._build_markup(quotes, data, int(params.get("offset", 0)), mode)
+        await update.message.reply_text(text, reply_markup=markup or self.main_keyboard)
 
-        count = response_data.get("count", len(quotes))
-        text += f"Всего цитат: {count}"
+    async def _render_into(self, query, context, data, params, title, mode):
+        """Перерисовать страницу цитат на месте (из callback)."""
+        quotes = data.get("results", [])
+        if not quotes:
+            context.user_data.pop("nav", None)
+            await self._safe_edit(query, self._empty_text(mode, params))
+            return
 
-        keyboard = []
-        nav_buttons = []
+        context.user_data["nav"] = {
+            "params": dict(params),
+            "title": title,
+            "mode": mode,
+        }
+        text = self._format_page(data, params, title)
+        markup = self._build_markup(quotes, data, int(params.get("offset", 0)), mode)
+        await self._safe_edit(query, text, markup)
 
-        if response_data.get("previous"):
-            nav_buttons.append("◀️ Назад")
-        if response_data.get("next"):
-            nav_buttons.append("Вперед ▶️")
-
-        if nav_buttons:
-            keyboard.append(nav_buttons)
-        keyboard.append(["🔙 Главное меню"])
-
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text(text, reply_markup=reply_markup)
-
-        context.user_data["current_response"] = response_data
-        context.user_data["page_title"] = title
-
-    async def _fetch_quotes_page(self, params, title="📖 Ваши цитаты"):
-        """Универсальный метод получения страницы цитат"""
-        response = self._make_api_request("/quotes/", "GET", params=params)
-        if response and response.status_code == 200:
-            response_data = response.json()
-            response_data["current_params"] = params
-            return response_data, title
-        return None, title
-
+    # ------------------------------------------------------------------ #
+    # Команды-обработчики меню
+    # ------------------------------------------------------------------ #
     async def list_quotes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать цитаты пользователя с пагинацией"""
         user_id = f"{update.effective_user.id}"
-
-        response_data, title = await self._fetch_quotes_page(
-            {"user_id": user_id, "limit": PAGE_LIMIT},
+        await self._send_page(
+            update,
+            context,
+            {"user_id": user_id, "limit": PAGE_LIMIT, "offset": 0},
+            "📖 Ваши цитаты",
+            "view",
         )
 
-        if response_data:
-            await self._send_quote_page(update, context, response_data, title)
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка при загрузке цитат", reply_markup=self.main_keyboard
-            )
+    async def delete_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = f"{update.effective_user.id}"
+        await self._send_page(
+            update,
+            context,
+            {"user_id": user_id, "limit": PAGE_LIMIT, "offset": 0},
+            "🗑️ Удаление — нажмите 🗑 у цитаты",
+            "delete",
+        )
 
     async def search_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Поиск цитат по автору"""
         await update.message.reply_text(
-            "👤 Введите имя автора для поиска:",
-            reply_markup=ReplyKeyboardMarkup([["🔙 Отмена"]], resize_keyboard=True),
+            "👤 Введите имя автора (можно часть, регистр не важен):",
+            reply_markup=self.cancel_keyboard,
         )
         context.user_data["awaiting_search_author"] = True
 
     async def search_by_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Поиск цитат по дате"""
         await update.message.reply_text(
-            "📅 Введите дату в формате ГГГГ-ММ-ДД (например: 2025-10-24):",
-            reply_markup=ReplyKeyboardMarkup([["🔙 Отмена"]], resize_keyboard=True),
+            "📅 Введите дату ГГГГ-ММ-ДД (например: 2025-10-24):",
+            reply_markup=self.date_keyboard,
         )
         context.user_data["awaiting_search_date"] = True
 
     async def add_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Добавление цитаты"""
         await update.message.reply_text(
-            "✍️ Напишите текст цитаты:",
-            reply_markup=ReplyKeyboardMarkup([["🔙 Отмена"]], resize_keyboard=True),
+            "✍️ Напишите текст цитаты:", reply_markup=self.cancel_keyboard
         )
         context.user_data["awaiting_quote"] = True
         context.user_data["quote_stage"] = "text"
 
+    def _random_payload(self, user_id):
+        """Возвращает (text, InlineKeyboardMarkup|None) для случайной цитаты."""
+        response = self._make_api_request(f"/random/{user_id}", "GET")
+        if response is None:
+            return "❌ Сервис недоступен, попробуйте позже", None
+        if response.status_code == 200:
+            quote = response.json()
+            text = f'🎲 Случайная цитата\n\n"{quote["text"]}"\n— {quote["author"]}'
+            if quote.get("timestamp"):
+                text += f" ({quote['timestamp']})"
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🎲 Ещё одну", callback_data="rand")]]
+            )
+            return text, markup
+        return (
+            "📝 У вас пока нет цитат.\nДобавьте первую — кнопка ➕ Добавить цитату",
+            None,
+        )
+
     async def random_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение случайной цитаты"""
-        user_id = f"{update.effective_user.id}"
-        try:
-            response = requests.get(f"{API_URL}/random/{user_id}")
-        except Exception:
-            response = None
+        text, markup = self._random_payload(f"{update.effective_user.id}")
+        await update.message.reply_text(text, reply_markup=markup or self.main_keyboard)
 
-        if response is not None and response.status_code == 200:
-            data = response.json()
-            text = f'🎲 Случайная цитата\n\n"{data["text"]}"\n— {data["author"]}'
-            if "timestamp" in data:
-                text += f" ({data['timestamp']})"
+    # ------------------------------------------------------------------ #
+    # Inline callbacks
+    # ------------------------------------------------------------------ #
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        action, value = parse_callback(query.data)
+        user_id = f"{query.from_user.id}"
 
-            await update.message.reply_text(text, reply_markup=self.main_keyboard)
-        elif response is not None and response.status_code == 404:
-            await update.message.reply_text(
-                "📝 У вас пока нет цитат",
-                reply_markup=self.main_keyboard,
-            )
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка при загрузке цитат", reply_markup=self.main_keyboard
-            )
+        if action == "nav":
+            await self._handle_nav(query, context, int(value))
+        elif action == "del":
+            await self._handle_delete(query, context, value, user_id)
+        elif action == "edit":
+            await self._handle_edit_start(query, context, value)
+        elif action == "rand":
+            text, markup = self._random_payload(user_id)
+            await self._safe_edit(query, text, markup)
 
-    async def delete_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Удаление цитаты"""
-        user_id = f"{update.effective_user.id}"
+    async def _handle_nav(self, query, context, offset):
+        nav = context.user_data.get("nav")
+        if not nav:
+            await self._safe_edit(query, "Список устарел. Откройте его заново из меню.")
+            return
+        params = dict(nav["params"])
+        params["offset"] = offset
+        data, error = self._fetch_quotes(params)
+        if error:
+            await self._safe_edit(query, self._error_text(error))
+            return
+        await self._render_into(query, context, data, params, nav["title"], nav["mode"])
 
-        response_data, _ = await self._fetch_quotes_page(
-            {"user_id": user_id, "limit": 50}
+    async def _handle_delete(self, query, context, quote_id, user_id):
+        response = self._make_api_request(
+            f"/quotes/{quote_id}/", "DELETE", params={"user_id": user_id}
+        )
+        if response is None or response.status_code not in (200, 204):
+            await self._safe_edit(query, "❌ Не удалось удалить цитату")
+            return
+
+        nav = context.user_data.get("nav")
+        if not nav:
+            await self._safe_edit(query, "✅ Цитата удалена")
+            return
+
+        params = dict(nav["params"])
+        data, error = self._fetch_quotes(params)
+        if error:
+            await self._safe_edit(query, self._error_text(error))
+            return
+
+        # Если страница опустела — шагнём на предыдущую
+        if not data.get("results") and int(params.get("offset", 0)) > 0:
+            params["offset"] = max(0, int(params.get("offset", 0)) - PAGE_LIMIT)
+            data, error = self._fetch_quotes(params)
+            if error:
+                await self._safe_edit(query, self._error_text(error))
+                return
+
+        await self._render_into(query, context, data, params, nav["title"], nav["mode"])
+
+    async def _handle_edit_start(self, query, context, quote_id):
+        response = self._make_api_request(f"/quotes/{quote_id}/", "GET")
+        if response is None or response.status_code != 200:
+            await self._safe_edit(query, "❌ Не удалось открыть цитату")
+            return
+
+        quote = response.json()
+        context.user_data["awaiting_edit"] = True
+        context.user_data["edit_id"] = quote_id
+        context.user_data["edit_stage"] = "text"
+        await query.message.reply_text(
+            f'✏️ Текущий текст:\n"{quote["text"]}"\n\nВведите новый текст цитаты:',
+            reply_markup=self.cancel_keyboard,
         )
 
-        if response_data:
-            quotes = response_data.get("results", [])
-            if quotes:
-                # Сохраняем ID цитат для удаления
-                quote_ids = {str(i + 1): quote["id"] for i, quote in enumerate(quotes)}
-                context.user_data["quote_ids"] = quote_ids
-                context.user_data["awaiting_delete_choice"] = True
-
-                await self._send_quote_page(
-                    update,
-                    context,
-                    response_data,
-                    title="🗑️ Выберите цитату для удаления:",
-                )
-            else:
-                await update.message.reply_text(
-                    "📝 У вас пока нет цитат для удаления",
-                    reply_markup=self.main_keyboard,
-                )
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка при загрузке цитат", reply_markup=self.main_keyboard
-            )
-
-    async def _handle_pagination(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, direction
-    ):
-        """Обработка пагинации"""
-        response_data = context.user_data.get("current_response", {})
-        url = (
-            response_data.get("previous")
-            if direction == "back"
-            else response_data.get("next")
-        )
-
-        if url:
-            response = requests.get(url)
-            if response.status_code == 200:
-                new_response_data = response.json()
-                # Сохраняем параметры из URL для вычисления offset
-                parsed = urlparse(url)
-                params = parse_qs(parsed.query)
-                current_params = {k: v[0] for k, v in params.items() if k != "offset"}
-                current_params["offset"] = int(params.get("offset", [0])[0])
-                new_response_data["current_params"] = current_params
-
-                await self._send_quote_page(
-                    update,
-                    context,
-                    new_response_data,
-                    title=context.user_data.get("page_title", "📖 Ваши цитаты"),
-                )
-            else:
-                await update.message.reply_text(
-                    "❌ Ошибка при загрузке страницы", reply_markup=self.main_keyboard
-                )
-        else:
-            await update.message.reply_text(
-                (
-                    "📄 Это последняя страница"
-                    if direction == "next"
-                    else "📄 Это первая страница"
-                ),
-                reply_markup=self.main_keyboard,
-            )
-
+    # ------------------------------------------------------------------ #
+    # Текстовый роутер
+    # ------------------------------------------------------------------ #
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
 
@@ -335,27 +417,13 @@ class SimpleQuoteBot:
             await menu_actions[text](update, context)
             return
 
-        if text == "◀️ Назад":
-            await self._handle_pagination(update, context, "back")
-            return
-
-        elif text == "Вперед ▶️":
-            await self._handle_pagination(update, context, "next")
-            return
-
-        elif text == "🔙 Главное меню":
-            # Чистим навигацию
-            if "current_response" in context.user_data:
-                del context.user_data["current_response"]
-            await update.message.reply_text(
-                "Главное меню:", reply_markup=self.main_keyboard
-            )
-            return
-
-        elif text == "🔙 Отмена":
-            # Чистим ввод
+        if text == "🔙 Отмена":
             for key in list(context.user_data.keys()):
-                if key.startswith("awaiting_") or key.startswith("quote_"):
+                if (
+                    key.startswith("awaiting_")
+                    or key.startswith("quote_")
+                    or key.startswith("edit_")
+                ):
                     del context.user_data[key]
             await update.message.reply_text(
                 "❌ Действие отменено", reply_markup=self.main_keyboard
@@ -364,16 +432,12 @@ class SimpleQuoteBot:
 
         if context.user_data.get("awaiting_quote"):
             await self._handle_quote_creation(update, context, text)
-
+        elif context.user_data.get("awaiting_edit"):
+            await self._handle_quote_edit(update, context, text)
         elif context.user_data.get("awaiting_search_author"):
             await self._handle_author_search(update, context, text)
-
         elif context.user_data.get("awaiting_search_date"):
             await self._handle_date_search(update, context, text)
-
-        elif context.user_data.get("awaiting_delete_choice"):
-            await self._handle_delete_choice(update, context, text)
-
         else:
             await update.message.reply_text(
                 "Используйте кнопки ниже для управления цитатами 👇",
@@ -383,136 +447,185 @@ class SimpleQuoteBot:
     async def _handle_quote_creation(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
     ):
-        """Обработка создания цитаты"""
-        if context.user_data.get("quote_stage") == "text":
+        stage = context.user_data.get("quote_stage")
+
+        if stage == "text":
+            error = validate_text(text)
+            if error:
+                await update.message.reply_text(
+                    error, reply_markup=self.cancel_keyboard
+                )
+                return
             context.user_data["quote_text"] = text
             context.user_data["quote_stage"] = "author"
-            await update.message.reply_text("👤 Теперь укажите автора:")
+            await update.message.reply_text(
+                "👤 Теперь укажите автора:", reply_markup=self.cancel_keyboard
+            )
 
-        elif context.user_data.get("quote_stage") == "author":
+        elif stage == "author":
+            error = validate_author(text)
+            if error:
+                await update.message.reply_text(
+                    error, reply_markup=self.cancel_keyboard
+                )
+                return
             context.user_data["quote_author"] = text
             context.user_data["quote_stage"] = "timestamp"
             await update.message.reply_text(
-                "📅 Укажите дату в формате ГГГГ-ММ-ДД "
-                "(или отправьте '.' для текущей даты):"
+                "📅 Укажите дату ГГГГ-ММ-ДД или нажмите «📅 Сегодня»:",
+                reply_markup=self.date_keyboard,
             )
 
-        elif context.user_data.get("quote_stage") == "timestamp":
-            user_id = f"{update.effective_user.id}"
+        elif stage == "timestamp":
+            timestamp, ok = parse_date_input(text)
+            if not ok:
+                await update.message.reply_text(
+                    "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД или «📅 Сегодня».",
+                    reply_markup=self.date_keyboard,
+                )
+                return
+
             quote_data = {
                 "text": context.user_data["quote_text"],
                 "author": context.user_data["quote_author"],
-                "user_id": user_id,
+                "user_id": f"{update.effective_user.id}",
             }
-
-            if text != ".":
-                try:
-                    datetime.strptime(text, "%Y-%m-%d")
-                    quote_data["timestamp"] = text
-                except ValueError:
-                    await update.message.reply_text(
-                        "❌ Неверный формат даты. Используйте "
-                        "ГГГГ-ММ-ДД или '.' для текущей даты:"
-                    )
-                    return
+            if timestamp:
+                quote_data["timestamp"] = timestamp
 
             response = self._make_api_request("/quotes/", "POST", json_data=quote_data)
-
-            if response:
-                await update.message.reply_text(
-                    "✅ Цитата сохранена!", reply_markup=self.main_keyboard
-                )
+            if response is None:
+                message = "❌ Сервис недоступен, попробуйте позже"
+            elif response.status_code == 201:
+                message = "✅ Цитата сохранена!"
             else:
-                await update.message.reply_text(
-                    "❌ Ошибка при сохранении цитаты (проверьте ввод)",
-                    reply_markup=self.main_keyboard,
-                )
+                message = "❌ Не удалось сохранить цитату. Проверьте ввод."
+            await update.message.reply_text(message, reply_markup=self.main_keyboard)
 
-            # Очищаем состояния
-            for key in ["awaiting_quote", "quote_stage", "quote_text", "quote_author"]:
+            for key in [
+                "awaiting_quote",
+                "quote_stage",
+                "quote_text",
+                "quote_author",
+            ]:
+                context.user_data.pop(key, None)
+
+    async def _handle_quote_edit(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+    ):
+        stage = context.user_data.get("edit_stage")
+
+        if stage == "text":
+            error = validate_text(text)
+            if error:
+                await update.message.reply_text(
+                    error, reply_markup=self.cancel_keyboard
+                )
+                return
+            context.user_data["edit_text"] = text
+            context.user_data["edit_stage"] = "author"
+            await update.message.reply_text(
+                "👤 Введите нового автора:", reply_markup=self.cancel_keyboard
+            )
+
+        elif stage == "author":
+            error = validate_author(text)
+            if error:
+                await update.message.reply_text(
+                    error, reply_markup=self.cancel_keyboard
+                )
+                return
+            context.user_data["edit_author"] = text
+            context.user_data["edit_stage"] = "timestamp"
+            await update.message.reply_text(
+                "📅 Новая дата ГГГГ-ММ-ДД, «📅 Сегодня» или «📅 Оставить как есть»:",
+                reply_markup=self.edit_date_keyboard,
+            )
+
+        elif stage == "timestamp":
+            patch_data = {
+                "text": context.user_data["edit_text"],
+                "author": context.user_data["edit_author"],
+            }
+            if text != KEEP_DATE_BUTTON:
+                timestamp, ok = parse_date_input(text)
+                if not ok:
+                    await update.message.reply_text(
+                        "❌ Неверный формат даты. ГГГГ-ММ-ДД, «📅 Сегодня» "
+                        "или «📅 Оставить как есть».",
+                        reply_markup=self.edit_date_keyboard,
+                    )
+                    return
+                patch_data["timestamp"] = timestamp or date.today().isoformat()
+
+            quote_id = context.user_data["edit_id"]
+            user_id = f"{update.effective_user.id}"
+            response = self._make_api_request(
+                f"/quotes/{quote_id}/",
+                "PATCH",
+                params={"user_id": user_id},
+                json_data=patch_data,
+            )
+            if response is None:
+                message = "❌ Сервис недоступен, попробуйте позже"
+            elif response.status_code == 200:
+                message = "✅ Цитата обновлена!"
+            else:
+                message = "❌ Не удалось обновить цитату. Проверьте ввод."
+            await update.message.reply_text(message, reply_markup=self.main_keyboard)
+
+            for key in [
+                "awaiting_edit",
+                "edit_stage",
+                "edit_id",
+                "edit_text",
+                "edit_author",
+            ]:
                 context.user_data.pop(key, None)
 
     async def _handle_author_search(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
     ):
-        """Обработка поиска по автору"""
-        author = text
         user_id = f"{update.effective_user.id}"
-
-        response_data, title = await self._fetch_quotes_page(
-            {"user_id": user_id, "author": author, "limit": PAGE_LIMIT},
-            f"🔍 Цитаты автора '{author}':",
-        )
-
-        if response_data:
-            await self._send_quote_page(update, context, response_data, title)
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка при поиске цитат", reply_markup=self.main_keyboard
-            )
-
         context.user_data.pop("awaiting_search_author", None)
+        await self._send_page(
+            update,
+            context,
+            {"user_id": user_id, "author": text, "limit": PAGE_LIMIT, "offset": 0},
+            f"🔍 Цитаты автора «{text}»",
+            "view",
+        )
 
     async def _handle_date_search(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
     ):
-        """Обработка поиска по дате"""
-        date_str = text
+        if text == TODAY_BUTTON:
+            date_str = date.today().isoformat()
+        else:
+            date_str = text
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД или «📅 Сегодня».",
+                    reply_markup=self.date_keyboard,
+                )
+                return
+
         user_id = f"{update.effective_user.id}"
-
-        try:
-            datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД:",
-                reply_markup=ReplyKeyboardMarkup([["🔙 Отмена"]], resize_keyboard=True),
-            )
-            return
-
-        response_data, title = await self._fetch_quotes_page(
-            {"user_id": user_id, "timestamp": date_str, "limit": PAGE_LIMIT},
-            f"📅 Цитаты за {date_str}:",
-        )
-
-        if response_data:
-            await self._send_quote_page(update, context, response_data, title)
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка при поиске цитат", reply_markup=self.main_keyboard
-            )
-
         context.user_data.pop("awaiting_search_date", None)
-
-    async def _handle_delete_choice(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
-    ):
-        """Обработка выбора цитаты для удаления"""
-        quote_ids = context.user_data.get("quote_ids", {})
-
-        if text in quote_ids:
-            quote_id = quote_ids[text]
-            user_id = f"{update.effective_user.id}"
-
-            response = self._make_api_request(
-                f"/quotes/{quote_id}/", "DELETE", params={"user_id": user_id}
-            )
-
-            if response:
-                await update.message.reply_text(
-                    "✅ Цитата успешно удалена!", reply_markup=self.main_keyboard
-                )
-            else:
-                await update.message.reply_text(
-                    "❌ Ошибка при удалении цитаты", reply_markup=self.main_keyboard
-                )
-        else:
-            await update.message.reply_text(
-                "❌ Неверный номер цитаты", reply_markup=self.main_keyboard
-            )
-
-        # Очищаем состояние удаления
-        context.user_data.pop("awaiting_delete_choice", None)
-        context.user_data.pop("quote_ids", None)
+        await self._send_page(
+            update,
+            context,
+            {
+                "user_id": user_id,
+                "timestamp": date_str,
+                "limit": PAGE_LIMIT,
+                "offset": 0,
+            },
+            f"📅 Цитаты за {date_str}",
+            "view",
+        )
 
 
 def run_bot():
