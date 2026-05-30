@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.urls import reverse
+from django.utils import timezone
 from parameterized import parameterized
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -141,6 +144,48 @@ class QuoteEndpointTest(APITestCase):
         if expected_count > 0:
             for quote_data in response.data["results"]:
                 self.assertEqual(quote_data["user_id"], user_id)
+
+    @parameterized.expand(
+        [
+            # author у quote1 (user test_user_1) = "Тестовый Автор 1"
+            ("partial_lowercase", "тестовый", 1),
+            ("partial_middle", "Автор", 1),
+            ("different_case", "ТЕСТОВЫЙ АВТОР 1", 1),
+            ("exact_full", "Тестовый Автор 1", 1),
+            ("no_match", "Пушкин", 0),
+        ]
+    )
+    def test_filter_by_author_icontains(self, name, author, expected_count):
+        """Поиск по автору: без учёта регистра и по части строки (№3)."""
+        url = reverse("quote-list")
+        response = self.client.get(url, {"user_id": "test_user_1", "author": author})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["count"],
+            expected_count,
+            f"Поиск автора '{author}' должен вернуть {expected_count} записей",
+        )
+
+    def test_ordering_newest_first(self):
+        """Список цитат отсортирован от новых к старым по created (№4)."""
+        user_id = "ordering_user"
+        quote_a = Quote.objects.create(text="A", author="X", user_id=user_id)
+        quote_b = Quote.objects.create(text="B", author="X", user_id=user_id)
+        quote_c = Quote.objects.create(text="C", author="X", user_id=user_id)
+
+        # Явно задаём distinct created, чтобы порядок был детерминированным
+        now = timezone.now()
+        Quote.objects.filter(pk=quote_a.pk).update(created=now - timedelta(minutes=2))
+        Quote.objects.filter(pk=quote_b.pk).update(created=now - timedelta(minutes=1))
+        Quote.objects.filter(pk=quote_c.pk).update(created=now)
+
+        url = reverse("quote-list")
+        response = self.client.get(url, {"user_id": user_id, "limit": 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        texts = [quote["text"] for quote in response.data["results"]]
+        self.assertEqual(texts, ["C", "B", "A"])
 
 
 class QuoteEndpointRobustnessTest(APITestCase):
