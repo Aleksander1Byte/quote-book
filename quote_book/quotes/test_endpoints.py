@@ -451,3 +451,93 @@ class QuoteEndpointRobustnessTest(APITestCase):
 
         except Exception as e:
             self.fail(f"Тест '{test_name}' вызвал исключение: {str(e)}")
+
+
+class QuoteBulkImportTest(APITestCase):
+    def setUp(self):
+        self.url = reverse("quote-bulk-import")
+        self.user_id = "bulk_user"
+        self.records = [
+            {"text": "Первая", "author": "Автор A", "timestamp": "2025-10-24"},
+            {"text": "Вторая", "author": "Автор B", "timestamp": "2025-10-25"},
+            {"text": "Третья", "author": "Автор C", "timestamp": "2025-10-26"},
+        ]
+
+    def test_imports_valid_list(self):
+        response = self.client.post(
+            self.url,
+            {"user_id": self.user_id, "results": self.records},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["created"], 3)
+        self.assertEqual(response.data["skipped"], 0)
+        self.assertEqual(Quote.objects.filter(user_id=self.user_id).count(), 3)
+
+    def test_accepts_bare_list_body(self):
+        items = [dict(r, user_id="ignored") for r in self.records]
+        response = self.client.post(self.url, items, format="json")
+        # Голый список без top-level user_id → нет user_id → 400.
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mixed_valid_and_invalid(self):
+        future = (timezone.now().date() + timedelta(days=365)).isoformat()
+        records = [
+            {"text": "Ок", "author": "A", "timestamp": "2025-10-24"},
+            {"text": "A" * 1000, "author": "A"},  # слишком длинный текст
+            {"text": "Будущее", "author": "A", "timestamp": future},  # дата в будущем
+        ]
+        response = self.client.post(
+            self.url, {"user_id": self.user_id, "results": records}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["created"], 1)
+        self.assertEqual(response.data["skipped"], 2)
+        self.assertEqual(Quote.objects.filter(user_id=self.user_id).count(), 1)
+
+    def test_duplicate_reimport_skips(self):
+        body = {"user_id": self.user_id, "results": self.records}
+        first = self.client.post(self.url, body, format="json")
+        second = self.client.post(self.url, body, format="json")
+        self.assertEqual(first.data["created"], 3)
+        self.assertEqual(second.data["created"], 0)
+        self.assertEqual(second.data["skipped"], 3)
+        self.assertEqual(Quote.objects.filter(user_id=self.user_id).count(), 3)
+
+    @parameterized.expand(
+        [
+            ("missing_user_id", {"results": []}),
+            ("results_not_a_list", {"user_id": "u", "results": "nope"}),
+            ("empty_user_id", {"user_id": "", "results": []}),
+        ]
+    )
+    def test_bad_request_bodies(self, name, body):
+        response = self.client.post(self.url, body, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_per_item_user_id_ignored(self):
+        records = [
+            {
+                "text": "T",
+                "author": "A",
+                "user_id": "attacker",
+                "timestamp": "2025-10-24",
+            }
+        ]
+        self.client.post(
+            self.url, {"user_id": self.user_id, "results": records}, format="json"
+        )
+        self.assertEqual(Quote.objects.filter(user_id="attacker").count(), 0)
+        self.assertEqual(Quote.objects.filter(user_id=self.user_id).count(), 1)
+
+    @parameterized.expand(
+        [
+            ("scalar_int", 42),
+            ("scalar_string", "hello"),
+            ("scalar_null", None),
+        ]
+    )
+    def test_scalar_body_no_500(self, name, body):
+        response = self.client.post(self.url, body, format="json")
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

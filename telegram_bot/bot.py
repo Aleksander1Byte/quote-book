@@ -1,3 +1,5 @@
+import io
+import json
 import math
 import os
 from datetime import date, datetime
@@ -24,8 +26,10 @@ from helpers import (
     KEEP_DATE_BUTTON,
     PAGE_LIMIT,
     TODAY_BUTTON,
+    build_export_payload,
     parse_callback,
     parse_date_input,
+    parse_import_payload,
     validate_author,
     validate_text,
 )
@@ -34,6 +38,8 @@ load_dotenv()
 
 API_URL = os.getenv("API_URL")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+EXPORT_LIMIT = 100000  # один запрос за всеми цитатами (в API нет max_limit)
+MAX_IMPORT_BYTES = 1_000_000  # потолок размера загружаемого файла
 SOCKS5 = os.getenv("SOCKS5", "f").lower() in ("t", "true", "1", "y", "yes")
 proxy_url = os.getenv("proxy_url")
 
@@ -78,7 +84,12 @@ class SimpleQuoteBot:
         self.application.add_handler(CommandHandler("search_date", self.search_by_date))
         self.application.add_handler(CommandHandler("delete", self.delete_quote))
         self.application.add_handler(CommandHandler("random", self.random_quote))
+        self.application.add_handler(CommandHandler("export", self.export_quotes))
+        self.application.add_handler(CommandHandler("import", self.import_quotes))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        self.application.add_handler(
+            MessageHandler(filters.Document.ALL, self.handle_document)
+        )
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text)
         )
@@ -99,9 +110,12 @@ class SimpleQuoteBot:
             "🔍 Поиск по автору — без учёта регистра, по части имени\n"
             "📅 Поиск по дате — найти цитаты за дату\n"
             "🗑️ Удалить цитату — кнопка 🗑 рядом с цитатой\n"
-            "✏️ Редактировать — кнопка ✏️ рядом с цитатой в списке\n\n"
+            "✏️ Редактировать — кнопка ✏️ рядом с цитатой в списке\n"
+            "📤 /export — скачать все цитаты в .json\n"
+            "📥 /import — загрузить цитаты из .json\n\n"
             "Формат даты: ГГГГ-ММ-ДД (например: 2025-10-24)\n\n"
-            "Команды: /quotes /add /random /search /search_date /delete"
+            "Команды: /quotes /add /random /search /search_date /delete "
+            "/export /import"
         )
         await update.message.reply_text(help_text, reply_markup=self.main_keyboard)
 
@@ -135,6 +149,18 @@ class SimpleQuoteBot:
         if response.status_code == 200:
             return response.json(), None
         return None, "http"
+
+    def _fetch_all_quotes(self, user_id):
+        """Все цитаты пользователя одним запросом.
+
+        Возвращает (results|None, error|None).
+        """
+        data, error = self._fetch_quotes(
+            {"user_id": user_id, "limit": EXPORT_LIMIT, "offset": 0}
+        )
+        if error:
+            return None, error
+        return data.get("results", []), None
 
     @staticmethod
     def _error_text(error):
@@ -321,6 +347,96 @@ class SimpleQuoteBot:
     async def random_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = self._random_payload(f"{update.effective_user.id}")
         await update.message.reply_text(text, reply_markup=markup or self.main_keyboard)
+
+    # ------------------------------------------------------------------ #
+    # Экспорт / импорт
+    # ------------------------------------------------------------------ #
+    async def export_quotes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = f"{update.effective_user.id}"
+        results, error = self._fetch_all_quotes(user_id)
+        if error:
+            await update.message.reply_text(
+                self._error_text(error), reply_markup=self.main_keyboard
+            )
+            return
+        if not results:
+            await update.message.reply_text(
+                "📭 У вас пока нет цитат для экспорта.",
+                reply_markup=self.main_keyboard,
+            )
+            return
+
+        payload = build_export_payload(results)
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        buffer = io.BytesIO(text.encode("utf-8"))
+        await update.message.reply_document(
+            document=buffer,
+            filename=f"quotes_{date.today().isoformat()}.json",
+            caption=f"📤 Экспорт: {payload['count']} цитат(ы)",
+        )
+
+    async def import_quotes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data["awaiting_import"] = True
+        await update.message.reply_text(
+            "📥 Пришлите .json файл с цитатами (из экспорта или список цитат).\n"
+            "Повторы (тот же текст, автор и дата) будут пропущены.",
+            reply_markup=self.cancel_keyboard,
+        )
+
+    async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.user_data.get("awaiting_import"):
+            await update.message.reply_text(
+                "Чтобы загрузить цитаты, сначала отправьте /import.",
+                reply_markup=self.main_keyboard,
+            )
+            return
+        context.user_data.pop("awaiting_import", None)
+
+        document = update.message.document
+        if document.file_size and document.file_size > MAX_IMPORT_BYTES:
+            await update.message.reply_text(
+                "❌ Файл слишком большой (макс. 1 МБ).",
+                reply_markup=self.main_keyboard,
+            )
+            return
+
+        tg_file = await document.get_file()
+        raw = bytes(await tg_file.download_as_bytearray())
+
+        valid, skipped_local = parse_import_payload(raw)
+        if valid is None:
+            await update.message.reply_text(
+                "❌ Не удалось прочитать JSON. Проверьте файл.",
+                reply_markup=self.main_keyboard,
+            )
+            return
+        if not valid:
+            await update.message.reply_text(
+                f"📭 Не найдено корректных цитат (пропущено: {skipped_local}).",
+                reply_markup=self.main_keyboard,
+            )
+            return
+
+        user_id = f"{update.effective_user.id}"
+        response = self._make_api_request(
+            "/quotes/bulk/",
+            "POST",
+            json_data={"user_id": user_id, "results": valid},
+        )
+        if response is None or response.status_code != 201:
+            await update.message.reply_text(
+                "❌ Сервис недоступен, попробуйте позже",
+                reply_markup=self.main_keyboard,
+            )
+            return
+
+        result = response.json()
+        imported = result.get("created", 0)
+        skipped = result.get("skipped", 0) + skipped_local
+        await update.message.reply_text(
+            f"✅ Импортировано: {imported}\n⏭ Пропущено: {skipped}",
+            reply_markup=self.main_keyboard,
+        )
 
     # ------------------------------------------------------------------ #
     # Inline callbacks
